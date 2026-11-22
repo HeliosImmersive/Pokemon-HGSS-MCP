@@ -1,0 +1,11 @@
+# local state: your ROM, saves, screenshots, run journal, emulator
+work/
+data/
+emu/
+*.nds
+*.sav
+*.SaveRAM
+*.State
+.venv/
+__pycache__/
+*.pyc

@@ -371,6 +371,152 @@ class Game:
                     return f"a message opened after {steps} steps (trainer or event)"
         return f"no encounter in {steps} steps"
 
+    # -- money and Poke Marts -------------------------------------------------------------------
+    MONEY_FROM_PARTY = -0x18  # player money (u32) sits just before the party in the save block
+    SHOP_CELLS = [(64, 248), (192, 248), (64, 288), (192, 288), (64, 328), (192, 328)]  # 2x3 grid
+    SHOP_HILITE = (227, 0, 0)
+
+    def money(self) -> int | None:
+        party = self.party_address()
+        return struct.unpack("<I", self.emu.read(party + self.MONEY_FROM_PARTY, 4))[0] if party else None
+
+    def shop_list(self) -> list[int] | None:
+        """The open shop's items (Gen 4 item ids): the longest known Mart list present in RAM. Known lists
+        come from pret's scrcmd_mart.c (badge-gated general stock + every specialty clerk)."""
+        marts = pkm.DATA.get("marts", {})
+        badge = marts.get("badge", [])
+        cands = [[i for i, b in badge if b <= n] for n in range(17)] + marts.get("lists", [])
+        # The game's code and static tables (including every specialty list) are loaded in RAM too,
+        # around 0x020Fxxxx; the open shop's working copy is on the heap, well above that.
+        heap = 0x150000
+        ram = self.ram()
+        best = None
+        for c in cands:
+            if len(c) >= 2 and ram.find(struct.pack(f"<{len(c)}H", *c), heap) >= 0 and (best is None or len(c) > len(best)):
+                best = c
+        return best
+
+    def _shop_cursor(self, img):
+        px = img.load()
+        pts = [(x, y) for y in range(196, 384, 2) for x in range(0, 256, 2) if px[x, y] == self.SHOP_HILITE]
+        if len(pts) < 20:
+            return None
+        cx = (min(p[0] for p in pts) + max(p[0] for p in pts)) / 2
+        cy = (min(p[1] for p in pts) + max(p[1] for p in pts)) / 2
+        if cy > 350:
+            return "cancel"
+        return int((cy - 230) // 40) * 2 + (0 if cx < 128 else 1)
+
+    @staticmethod
+    def _mart_menu_cursor(img):
+        """BUY / SELL / SEE YA! menu (three wide buttons): which one has the red border, or None."""
+        px = img.load()
+        best, best_n = None, 0
+        for name, y in (("buy", 192 + 30), ("sell", 192 + 78), ("quit", 192 + 126)):
+            n = sum(1 for x in range(8, 248, 3) if px[x, y][0] > 200 and px[x, y][1] < 90 and px[x, y][2] < 90)
+            if n > best_n:
+                best, best_n = name, n
+        return best if best_n > 20 else None
+
+    def buy(self, item: str, qty: int = 1) -> str:
+        """In a Poke Mart: talk to the clerk (unless the shop is already open), buy qty of an item by name,
+        confirm, leave, and verify the money spent from RAM."""
+        import actions
+        qty = max(1, min(99, int(qty)))
+        if self._shop_cursor(grab(self.emu)) is None and self._mart_menu_cursor(grab(self.emu)) is None:
+            loc = self.location()
+            clerk = next(((x, y) for x, y, spr in MAPS.get(loc.map_id, {}).get("npcs", [])
+                          if spr.startswith("shopm")), None)
+            if clerk is None:
+                return "no shop clerk on this map (not in a Poke Mart?)"
+            # the general-stock clerk is the lower one at the counter
+            clerks = sorted(((x, y) for x, y, spr in MAPS[loc.map_id]["npcs"] if spr.startswith("shopm")),
+                            key=lambda p: -p[1])
+            cx, cy = clerks[0]
+            r = self.walk_to(cx + 2, cy)
+            if (self.location().x, self.location().y) != (cx + 2, cy):
+                return f"couldn't reach the counter: {r['note']}"
+            self.emu.press("Left", 3, 6)
+            self.emu.press("A", 3, 20)
+            for _ in range(60):  # greeting text until the BUY/SELL/SEE YA menu
+                img = grab(self.emu)
+                if self._mart_menu_cursor(img) or self._shop_cursor(img) is not None:
+                    break
+                if screen.arrow_visible(img):
+                    self.emu.press("A", 3, 6)
+                else:
+                    self.emu.wait(10)
+        if self._mart_menu_cursor(grab(self.emu)):
+            for _ in range(4):
+                cur = self._mart_menu_cursor(grab(self.emu))
+                if cur == "buy":
+                    self.emu.press("A", 3, 30)
+                    break
+                self.emu.press("Up", 3, 10)
+        for _ in range(20):
+            if self._shop_cursor(grab(self.emu)) is not None:
+                break
+            self.emu.wait(10)
+        stock = self.shop_list()
+        if not stock:
+            return "shop is open but its item list wasn't recognised (look('bottom'))"
+        names = [pkm.ITEMS.get(i, str(i)) for i in stock]
+        want = item.lower().replace("é", "e").replace(".", "").replace(" ", "")
+        idx = next((k for k, n in enumerate(names) if n.lower().replace(" ", "") == want), None)
+        if idx is None:
+            return f"{item} isn't sold here; stock: {', '.join(names)}"
+        if idx >= len(self.SHOP_CELLS):
+            return f"{item} is on a later page of this shop; paging isn't scripted yet (stock: {', '.join(names)})"
+        before = self.money()
+        price = pkm.DATA.get("prices", {}).get(str(stock[idx]))
+        if price and before is not None and price * qty > before:
+            qty = before // price
+            if qty == 0:
+                return f"can't afford {item} (P{price}, you have P{before})"
+        bought, start_money = 0, before
+        for _attempt in range(3):  # buy, check the money spent, buy the rest if a press was missed
+            remaining = qty - bought
+            if remaining <= 0:
+                break
+            for _ in range(10):  # steer the highlight to the item's cell
+                cur = self._shop_cursor(grab(self.emu))
+                if cur == idx:
+                    break
+                if cur == "cancel" or cur is None:
+                    self.emu.press("Down", 3, 10)
+                    continue
+                (cx, cy), (tx, ty) = self.SHOP_CELLS[cur], self.SHOP_CELLS[idx]
+                self.emu.press(("Down" if ty > cy else "Up") if ty != cy else ("Right" if tx > cx else "Left"), 3, 10)
+            self.emu.press("A", 4, 70)  # pick the item -> "How many?" + quantity picker (starts at 1)
+            for _ in range((remaining - 1) // 10):
+                self.emu.press("Right", 4, 8)  # +10
+            for _ in range((remaining - 1) % 10):
+                self.emu.press("Up", 4, 8)  # +1
+            self.emu.press("A", 4, 40)  # BUY
+            self.emu.press("A", 4, 40)  # "That will be P..." -> YES
+            for _ in range(8):  # "Here you are!", "You put away...", maybe a Premier Ball bonus
+                if self._shop_cursor(grab(self.emu)) is not None:
+                    break
+                self.emu.press("A", 3, 30)
+            now = self.money()
+            if price and now is not None and before is not None:
+                bought += (before - now) // price
+                before = now
+            else:
+                break
+        before = start_money
+        self.emu.press("B", 3, 40)  # leave the item grid -> "Anything else?" BUY/SELL/SEE YA menu
+        for _ in range(4):  # B on that menu is SEE YA!; stop once the overworld menu is back
+            if screen.field_menu(grab(self.emu)):
+                break
+            self.emu.press("B", 3, 30)
+            actions.advance_text(self.emu, max_messages=3)
+        after = self.money()
+        spent = (before - after) if before is not None and after is not None else None
+        got = spent // price if spent is not None and price else None
+        return (f"bought {got if got is not None else '?'} x {names[idx]} for P{spent}; money P{after}"
+                if spent else f"nothing bought (money P{after}); check look()")
+
     def follow_scene(self, max_rounds: int = 30) -> dict:
         """Cutscenes that walk you around between messages (tours, rivals, events): keep reading
         text while the game moves the player, until it settles or asks a real choice."""
@@ -396,7 +542,8 @@ class Game:
     # -- summary --------------------------------------------------------------------------------
     def summary(self) -> str:
         loc = self.location()
-        lines = [f"at: {loc} | area: {loc.area}"]
+        money = self.money()
+        lines = [f"at: {loc} | area: {loc.area}" + (f" | money P{money}" if money is not None else "")]
         party = self.party()
         lines.append("party: " + ("; ".join(m.line() for m in party) if party else "none"))
         names = ["hp", "atk", "def", "spe", "spa", "spd", "acc", "eva"]

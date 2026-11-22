@@ -26,7 +26,7 @@ and the ROM's map data instead, and only sends images when the agent asks:
 
 | Tool | What it does |
 |---|---|
-| `state()` | Location (map name, area, x/y), party with HP/moves/PP, live battle HP and stat stages, whether this area's Nuzlocke encounter is free, message-box status |
+| `state()` | Location (map name, area, x/y), money, party with HP/moves/PP, live battle HP and stat stages, whether this area's Nuzlocke encounter is free, message-box status |
 | `look(view)` | Native-resolution screenshot: `both`, `top`, `bottom`, `text` |
 | `press(keys)` | Buttons in order: `"Down*2 A"`, `"A+B"`, `"wait30"`, `"hold:Right:40"` |
 | `read_text()` | Press through dialogue until it closes or a real Yes/No choice appears. Handles phone calls too |
@@ -38,6 +38,7 @@ and the ROM's map data instead, and only sends images when the agent asks:
 | `fight(move)` / `fight_until(move)` | Use a move by name or slot and follow the turn; repeat until the battle ends (hands back control at low HP) |
 | `catch(slot)` / `run_away()` | Throw a ball from the Poké Balls pocket / flee |
 | `heal()` | Inside a Pokémon Center: talk to the nurse and heal |
+| `buy(item, quantity)` | Inside a Poké Mart: talk to the clerk, buy by item name, confirm, leave; checks the money spent from RAM |
 | `open_menu(item)` / `save()` | Field menu entries; in-game save written to disk |
 | `type_text(text)` | Type on naming keyboards (player, nicknames, rival) |
 | `run_journal()`, `log_encounter()`, `log_death()`, `note()`, `set_goal()`, `add_badge()` | Optional Nuzlocke journal: the run's memory between sessions |
@@ -95,8 +96,9 @@ with play habits that keep token use low; drop it into your agent's skills folde
   with Python each frame. (BizHawk's Lua socket API blocks the emulator while waiting, so file IPC keeps the
   game running when no agent is connected.)
 - **Memory.** Party Pokémon are found by scanning RAM for Gen 4 party structures and decrypting them
-  (`pkm.py`). The player's location sits at a fixed offset from the party in the save block. Live battle HP
-  and stat stages come from the in-battle structures.
+  (`pkm.py`). The player's location and money sit at fixed offsets from the party in the save block. Live
+  battle HP and stat stages come from the in-battle structures. Shop stock is matched against the Mart lists
+  in pret's `scrcmd_mart.c`.
 - **Maps.** Collision, tall grass, water and ledges come from the ROM's own land data and map matrices
   (`rom.py`, `mapdata.py`), so `walk_to` plans real routes. Map names, doors and NPCs come from
   pret/pokeheartgold.
@@ -108,7 +110,8 @@ with play habits that keep token use low; drop it into your agent's skills folde
 - **Touch input doesn't work**: BizHawk's melonDS core ignores Lua touch coordinates. Everything goes
   through buttons, which covers HG/SS's menus, battles and the field menu.
 - Some bottom-screen-only messages aren't read by `read_text()`; use `look("bottom")` and `press()`.
-- Double battles, moves that need a target, the PC box and the Poké Mart don't have helpers yet.
+- Double battles, moves that need a target and the PC box don't have helpers yet. `buy()` handles the first
+  page of a shop (six items); paging through longer shop lists isn't scripted yet.
 - RAM offsets were verified on HeartGold (USA). SoulSilver and other regions likely work but are untested.
 - Windows pauses BizHawk while its window is being dragged.
 

@@ -1,7 +1,7 @@
 """Command-line version of the heartgold MCP tools (for sessions without the MCP server).
 
   python hgss_mcp/cli.py state | look [both|top|bottom|text] | press "Down*2 A" | text [max] | walk DIR [N] [run]
-  python hgss_mcp/cli.py fight MOVE | to X Y | exits | menu ITEM | type TEXT | save | journal | note TEXT | goal TEXT
+  python hgss_mcp/cli.py fight MOVE | buy ITEM [QTY] | to X Y | exits | menu ITEM | type TEXT | save | journal | note TEXT | goal TEXT
 Images are written to <work>/shots/look.png or text.png (read them with your image/file tool).
 """
 import sys
@@ -72,6 +72,9 @@ def main(argv):
             screen.montage(r["messages"]).save(SHOTS / "text.png")
             print(SHOTS / "text.png")
         print(g.summary())
+    elif cmd == "buy":
+        print(g.buy(" ".join(args[:-1]) if len(args) > 1 and args[-1].isdigit() else " ".join(args),
+                    int(args[-1]) if len(args) > 1 and args[-1].isdigit() else 1))
     elif cmd == "heal":
         print(g.heal())
     elif cmd == "scene":

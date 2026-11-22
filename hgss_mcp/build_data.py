@@ -206,3 +206,24 @@ for m in re.finditer(r"\[(MAP_\w+)\]\s*=\s*\{(.*?)\n\s*\},", headers, re.S):
         maps[mid]["matrix"] = int(mx.group(1))
 (DATA / "gen4.json").write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
 print("matrix ids:", {k: maps[k].get("matrix") for k in (33, 60, 61, 63)})
+
+# Poke Mart inventories (pret src/scrcmd_mart.c: badge-gated general list + specialty clerk lists) and
+# item prices (PokeAPI items.csv cost, keyed by the Gen 4 item index the game uses).
+for f in ("include/constants/items.h", "src/scrcmd_mart.c"):
+    _download(PRET_RAW + f, PRET / Path(f).name)
+item_const = {m[0]: int(m[1]) for m in re.findall(r"#define (ITEM_\w+)\s+(\d+)", (PRET / "items.h").read_text())}
+mart_src = (PRET / "scrcmd_mart.c").read_text()
+badge_table = re.search(r"BadgeMartItems\s+\w+\[\]\s*=\s*\{(.*?)\};", mart_src, re.S)
+badge_items = [[item_const[n], int(b)] for n, b in re.findall(r"\{\s*(ITEM_\w+),\s*(\d+)\s*\}", badge_table.group(1))
+               if n in item_const] if badge_table else []
+lists = []
+for body in re.findall(r"const u16 \w+\[\]\s*=\s*\{([^}]*ITEM_[^}]*)\}", mart_src):
+    ids = [item_const[n] for n in re.findall(r"ITEM_\w+", body) if n in item_const]
+    if ids:
+        lists.append(ids)
+gen4_index = {int(r["item_id"]): int(r["game_index"]) for r in rows("item_game_indices") if int(r["generation_id"]) == 4}
+prices = {gen4_index[int(r["id"])]: int(r["cost"]) for r in rows("items") if int(r["id"]) in gen4_index and r["cost"]}
+out["marts"] = {"badge": badge_items, "lists": lists}
+out["prices"] = prices
+(DATA / "gen4.json").write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
+print(f"marts: {len(badge_items)} badge items, {len(lists)} lists; Poke Ball costs {prices.get(4)}")

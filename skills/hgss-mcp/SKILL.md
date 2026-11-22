@@ -38,6 +38,7 @@ Raw `press("A")` in battle is how runs get ruined: A on the battle menu picks FI
 - `catch()` throws the first ball in the Poké Balls pocket. On "CAUGHT", the nickname prompt follows:
   `answer(True)` then `type_text("NAME")`.
 - `run_away()` flees a wild battle. `heal()` inside a Pokémon Center heals the party.
+- `buy("Poke Ball", 10)` inside a Poké Mart buys by name and reports what was spent; `state()` shows money.
 - Weaken before catching when it's safe. Remember critical hits can knock out a weakened target.
 
 ## Encounters and Nuzlocke rules (if playing one)
@@ -52,7 +53,7 @@ Raw `press("A")` in battle is how runs get ruined: A on the battle menu picks FI
 
 - Touch input doesn't work; buttons cover menus and battles (X toggles the field menu into button mode).
 - Bottom-screen-only messages (some prompts) aren't read by `read_text()`: `look("bottom")` + `press()`.
-- No helpers yet for double battles, targeting, the PC box or the Poké Mart.
+- No helpers yet for double battles, targeting or the PC box; `buy()` only covers a shop's first page.
 - If BizHawk stops answering, the next call relaunches it and reloads the last in-game save, so save at
   checkpoints (Pokémon Centers).
 

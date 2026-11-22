@@ -122,6 +122,13 @@ def seek_encounter() -> str:
 
 
 @mcp.tool()
+def buy(item: str, quantity: int = 1) -> str:
+    """Inside a Poke Mart: talk to the clerk, buy an item by name (e.g. "Poke Ball", "Potion"), confirm,
+    leave, and report what was spent (checked from RAM). Caps the quantity at what you can afford."""
+    return g().buy(item, quantity)
+
+
+@mcp.tool()
 def heal() -> str:
     """Inside a Pokemon Center: walk to the nurse, accept healing, and report the party's HP."""
     return g().heal()

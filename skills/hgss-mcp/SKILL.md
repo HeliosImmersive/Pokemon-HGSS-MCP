@@ -23,9 +23,12 @@ Every image stays in the conversation and is re-read on each turn, so prefer tex
   `follow_scene()` does the same for cutscenes that move you around between messages.
 - `look("text")` (~12 tokens) for just the message box; `look("top")`/`look("bottom")` (~65); `look()` (~130).
   Look only when text results don't tell you enough (a new menu, an unexpected stop).
-- Move with `walk_to(x, y)`: it uses the ROM's collision map, jumps ledges, avoids tall grass, and walking
-  onto a door goes through it. `exits()` lists doors/warps with coordinates. `walk()` stops on battles,
-  trainers and events: then use `read_text()` or the battle tools.
+- Travel with `go_to("Cherrygrove")` (towns/routes by name, out of buildings and through gatehouses) or
+  `walk_to(x, y)`: both use the ROM's collision map, jump ledges, avoid tall grass, and walking onto a door
+  goes through it. `exits()` lists doors/warps with coordinates. Walking stops on battles, trainers and
+  events: then use `read_text()` / `follow_scene()` or the battle tools, and call `go_to` again.
+- People: `talk("mama")` walks up to someone (sprite name from `npcs()`, nearest person if empty), faces
+  them and reads the conversation. `bag()` lists items; `state()` shows the Poké Ball count.
 - Think briefly on routine steps; save careful thinking for battles, catches and team decisions.
 
 ## Battles: use the battle tools, not raw presses
@@ -53,7 +56,10 @@ Raw `press("A")` in battle is how runs get ruined: A on the battle menu picks FI
 
 - Touch input doesn't work; buttons cover menus and battles (X toggles the field menu into button mode).
 - Bottom-screen-only messages (some prompts) aren't read by `read_text()`: `look("bottom")` + `press()`.
-- No helpers yet for double battles, targeting or the PC box; `buy()` only covers a shop's first page.
+- No helpers yet for double battles, targeting, reordering the party or the PC box (party order: X ->
+  POKéMON, A on a Pokémon, SWITCH, pick the other one); `buy()` only covers a shop's first page.
+- `catch()` reports "timeout" on a species' first catch: that's the Pokédex page; press A, then the
+  nickname prompt.
 - If BizHawk stops answering, the next call relaunches it and reloads the last in-game save, so save at
   checkpoints (Pokémon Centers).
 

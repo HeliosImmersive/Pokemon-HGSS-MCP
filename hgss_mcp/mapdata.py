@@ -31,6 +31,16 @@ def matrix(index: int):
 
 
 @lru_cache(maxsize=None)
+def chunk_maps(index: int):
+    """Map header id per 32x32 chunk (w, h, ids), or None if this matrix has a single map."""
+    data = rom.narc("a/0/4/1")[index]
+    w, h, has_headers, _, name_len = data[:5]
+    if not has_headers:
+        return None
+    return w, h, struct.unpack_from(f"<{w * h}H", data, 5 + name_len)
+
+
+@lru_cache(maxsize=None)
 def permissions(land_id: int):
     data = rom.narc("a/0/6/5")[land_id]
     perm_size, = struct.unpack_from("<I", data, 0)

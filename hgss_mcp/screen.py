@@ -42,6 +42,7 @@ def ink(img: Image.Image) -> int:
 
 
 FIELD_GREEN = (24, 203, 113)
+FIELD_GREEN_CLOSED = (40, 219, 146)
 
 
 def field_menu(img: Image.Image) -> bool:
@@ -49,7 +50,14 @@ def field_menu(img: Image.Image) -> bool:
     not on the title screen, in a battle, or in a menu."""
     px = img.load()
     pts = [(x, y) for x in range(12, 158, 4) for y in range(215, 380, 4)]
-    return sum(1 for p in pts if px[p] == FIELD_GREEN) / len(pts) > 0.4
+    # open menu (buttons on FIELD_GREEN), or the closed menu (a big Poke Ball on FIELD_GREEN_CLOSED). Yes/No
+    # prompts and the Mart's BUY/SELL menu use that same lighter green but draw white/grey buttons on it.
+    if sum(1 for p in pts if px[p] == FIELD_GREEN) / len(pts) > 0.4:
+        return True
+    if sum(1 for p in pts if px[p] == FIELD_GREEN_CLOSED) / len(pts) <= 0.4:
+        return False
+    buttons = sum(1 for p in pts if min(px[p]) > 150)
+    return buttons / len(pts) < 0.03
 
 
 CALL_BOX = (8, 140, 248, 188)  # Pokegear call: white text on black, blue caller header above
@@ -81,8 +89,9 @@ def _red_top(img):
 
 def battle_menu(img: Image.Image) -> bool:
     """The battle menu (big red FIGHT + orange BAG bottom-left) is showing: our turn to act."""
-    r, g, b = img.getpixel((30, 360))
-    return _red_top(img) and r > 190 and 90 < g < 210 and b < 120
+    # two spots on the plain orange of BAG (the label's letters sit around x 25-45, y 352-366)
+    pts = [img.getpixel(p) for p in ((12, 350), (66, 352))]
+    return _red_top(img) and any(r > 190 and 90 < g < 210 and b < 120 for r, g, b in pts)
 
 
 def battle_yesno(img: Image.Image) -> bool:

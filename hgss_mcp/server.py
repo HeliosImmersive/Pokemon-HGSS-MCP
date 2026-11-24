@@ -129,6 +129,38 @@ def buy(item: str, quantity: int = 1) -> str:
 
 
 @mcp.tool()
+def bag() -> str:
+    """Everything in the Bag by pocket (read from RAM; no menus opened)."""
+    b = g().bag()
+    return "\n".join(f"{k}: " + ", ".join(f"{n} x{q}" for n, q in v) for k, v in b.items()) or "bag is empty"
+
+
+@mcp.tool()
+def go_to(place: str) -> str:
+    """Walk to a town or route by name ("Cherrygrove", "Route 30") across the overworld, avoiding tall grass
+    where it can. Stops for battles, trainers and events (then read_text / battle tools, and call it again)."""
+    return g().go_to(place)
+
+
+@mcp.tool()
+def npcs() -> str:
+    """People on this map: sprite name and spawn tile (dx/dy from you). They may have wandered."""
+    return "\n".join(f"{p['sprite']} ({p['x']},{p['y']}) [dx {p['dx']:+d}, dy {p['dy']:+d}]"
+                     for p in g().npcs()) or "nobody on this map"
+
+
+@mcp.tool()
+def talk(who: str = "") -> list:
+    """Walk up to a person (sprite name or part of it, from npcs(); nearest person if empty), face them,
+    press A and read the conversation. Stops at Yes/No choices like read_text()."""
+    gm = g()
+    r = gm.talk(who)
+    if not r.startswith("talking"):
+        return [r, gm.summary()]
+    return [r] + read_text()
+
+
+@mcp.tool()
 def heal() -> str:
     """Inside a Pokemon Center: walk to the nurse, accept healing, and report the party's HP."""
     return g().heal()

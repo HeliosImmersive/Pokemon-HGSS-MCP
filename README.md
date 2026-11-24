@@ -19,7 +19,7 @@ and the ROM's map data instead, and only sends images when the agent asks:
 | One screen / both screens at native resolution | `look("top")` / `look()` | ~65 / ~130 tokens |
 | Just the message box | `look("text")` | ~12 tokens |
 | A whole conversation | `read_text()`: presses through it, returns every message stacked in one image | ~15 tokens per message |
-| Walk across a route | `walk_to(x, y)`: plans with the ROM's collision map, ledges and tall grass | one call |
+| Walk across a route | `go_to("Cherrygrove")` / `walk_to(x, y)`: plans with the ROM's collision map, ledges and tall grass | one call |
 | A whole battle turn | `fight("Tackle")`: picks the move, follows the turn, returns its messages + live HP | one call |
 
 ## Tools
@@ -34,6 +34,9 @@ and the ROM's map data instead, and only sends images when the agent asks:
 | `answer(yes)` | Answer a Yes/No prompt by steering the highlight |
 | `walk(dir, n, run)` / `walk_to(x, y)` | Movement with position checks from RAM; stops for battles, trainers and events |
 | `exits()` | Doors/warps on the current map with coordinates and destinations |
+| `go_to(place)` | Walk to a town or route by name ("Cherrygrove", "Route 30"), leaving buildings and passing through gatehouses on the way |
+| `npcs()` / `talk(who)` | People on the map (sprite name + spawn tile) / walk up to someone, face them, press A and read the conversation |
+| `bag()` | Everything in the Bag by pocket, read from RAM (`state()` also shows the Poké Ball count) |
 | `seek_encounter()` | Walk to the nearest tall grass and pace until a wild battle starts |
 | `fight(move)` / `fight_until(move)` | Use a move by name or slot and follow the turn; repeat until the battle ends (hands back control at low HP) |
 | `catch(slot)` / `run_away()` | Throw a ball from the Poké Balls pocket / flee |
@@ -110,7 +113,7 @@ with play habits that keep token use low; drop it into your agent's skills folde
 - **Touch input doesn't work**: BizHawk's melonDS core ignores Lua touch coordinates. Everything goes
   through buttons, which covers HG/SS's menus, battles and the field menu.
 - Some bottom-screen-only messages aren't read by `read_text()`; use `look("bottom")` and `press()`.
-- Double battles, moves that need a target and the PC box don't have helpers yet. `buy()` handles the first
+- Double battles, moves that need a target, reordering the party and the PC box don't have helpers yet. `buy()` handles the first
   page of a shop (six items); paging through longer shop lists isn't scripted yet.
 - RAM offsets were verified on HeartGold (USA). SoulSilver and other regions likely work but are untested.
 - Windows pauses BizHawk while its window is being dragged.

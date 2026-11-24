@@ -115,10 +115,15 @@ def advance_text(emu: Emu, max_messages: int = 40, max_steps: int = 400) -> Text
             if screen.choice_prompt(img) or screen.yesno_buttons(img):
                 res.stopped = "waiting for a choice (Yes/No)"
                 break
-            # The last line of a conversation has no arrow: close it and keep going.
-            emu.press("A", 3, 10)
-            still, prev = 0, None
-            continue
+            # The last line of a conversation has no arrow. Only close it when the plain overworld
+            # menu is underneath: anything else on the bottom screen (a picker, a shop, a keyboard,
+            # the starter machine...) means A would choose something.
+            if screen.field_menu(img):
+                emu.press("A", 3, 10)
+                still, prev = 0, None
+                continue
+            res.stopped = "message waiting without an arrow; a menu or picker may be open (look('bottom'))"
+            break
         emu.wait(6)
     else:
         res.stopped = "step limit"
@@ -136,7 +141,9 @@ CURSOR_RGB = (235, 73, 0)
 
 def _kb_cursor(img: Image.Image):
     px = img.load()
-    pts = [(x, y) for y in range(280, 366) for x in range(20, 240) if px[x, y] == CURSOR_RGB]
+    # the cursor pulses between orange shades ((235, 73, 0) ... (235, 121, 0))
+    pts = [(x, y) for y in range(280, 366) for x in range(20, 240)
+           if px[x, y][0] > 220 and 50 < px[x, y][1] < 140 and px[x, y][2] < 30]
     if len(pts) < 8:
         return None
     cx = (min(p[0] for p in pts) + max(p[0] for p in pts)) / 2
@@ -165,6 +172,14 @@ def _kb_find(emu: Emu):
 
 def type_text(emu: Emu, text: str, confirm: bool = True) -> str:
     """Type on the naming keyboard (A-Z, a-z, 0-9), steering by the on-screen cursor, then OK."""
+    for _ in range(30):  # the keyboard slides in after "Your name?"; press A if a message is waiting
+        img = grab(emu)
+        if _kb_page(img) is not None:
+            break
+        if screen.arrow_visible(img):
+            emu.press("A", 3, 10)
+        else:
+            emu.wait(10)
     for ch in text:
         page = "lower" if ch.islower() else "upper"
         target = next(((r, row.index(ch.upper() if ch.isalpha() else ch)) for r, row in enumerate(KB_LAYOUT)

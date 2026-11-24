@@ -1,7 +1,9 @@
 """Command-line version of the heartgold MCP tools (for sessions without the MCP server).
 
   python hgss_mcp/cli.py state | look [both|top|bottom|text] | press "Down*2 A" | text [max] | walk DIR [N] [run]
-  python hgss_mcp/cli.py fight MOVE | buy ITEM [QTY] | to X Y | exits | menu ITEM | type TEXT | save | journal | note TEXT | goal TEXT
+  python hgss_mcp/cli.py fight MOVE | auto MOVE | catch | run | buy ITEM [QTY] | heal | to X Y | go PLACE | exits | npcs | talk [WHO]
+  python hgss_mcp/cli.py bag | grass | scene | yes | no | menu ITEM | type TEXT | save
+  python hgss_mcp/cli.py journal | note TEXT | goal TEXT | enc SPECIES RESULT [NICK] | death NICK CAUSE | badge NAME
 Images are written to <work>/shots/look.png or text.png (read them with your image/file tool).
 """
 import sys
@@ -46,6 +48,17 @@ def main(argv):
         print(mcp_server.walk_to(int(args[0]), int(args[1])))
     elif cmd == "exits":
         print(mcp_server.exits())
+    elif cmd == "bag":
+        print(mcp_server.bag())
+    elif cmd == "go":
+        print(mcp_server.go_to(" ".join(args)))
+    elif cmd == "npcs":
+        print(mcp_server.npcs())
+    elif cmd == "talk":
+        r = g.talk(" ".join(args))
+        print(r)
+        if r.startswith("talking"):
+            main(["text"])
     elif cmd == "fight":
         r = g.fight(" ".join(args) if args else 1)
         print(f"{len(r['messages'])} messages; {r['note']}")
@@ -96,6 +109,12 @@ def main(argv):
         print(journal.note(" ".join(args)))
     elif cmd == "goal":
         print(journal.set_goal(" ".join(args)))
+    elif cmd == "enc":  # enc SPECIES RESULT [NICKNAME]
+        print(mcp_server.log_encounter(args[0], args[1], args[2] if len(args) > 2 else ""))
+    elif cmd == "death":  # death NICKNAME CAUSE...
+        print(mcp_server.log_death(args[0], " ".join(args[1:])))
+    elif cmd == "badge":
+        print(mcp_server.add_badge(" ".join(args)))
     else:
         print(__doc__)
 

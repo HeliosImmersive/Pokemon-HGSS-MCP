@@ -113,8 +113,30 @@ class Game:
             party = self.party_address()
             if party:
                 self.loc_addr = party + PARTY_TO_LOC
-                m, w, x, y = struct.unpack("<4I", self.emu.read(self.loc_addr, 16))
+            else:  # new game, no Pokemon yet: find the record itself
+                self.loc_addr = self._scan_location() or self.loc_addr
+            m, w, x, y = struct.unpack("<4I", self.emu.read(self.loc_addr, 16))
         return Location(m, x, y)
+
+    def _scan_location(self) -> int | None:
+        """Before the first Pokemon there's no party to anchor on: look for the save block's
+        Location record directly (a real map id, a warp index or -1, small x/y) in the heap."""
+        # Save block layout around it: trainer name (8 x u16, 0xFFFF-terminated), ID (u32), money (u32),
+        # ... party (money + 0x18), ... Location (money + 0x11BC). Require all three to look right.
+        ram = self.ram()
+        for off in range(0x200000, len(ram) - 0x1200, 4):
+            money, = struct.unpack_from("<I", ram, off)
+            if money > 999999:
+                continue
+            m, w, x, y = struct.unpack_from("<4I", ram, off + 0x11BC)
+            if not (4 <= m < 600 and m in MAPS and (w == 0xFFFFFFFF or w < 64) and 0 < x < 2048 and 0 < y < 2048):
+                continue
+            name = struct.unpack_from("<8H", ram, off - 0x14)
+            if 0xFFFF not in name or not all(0x0121 <= c <= 0x015E for c in name[:name.index(0xFFFF)]) \
+                    or name.index(0xFFFF) == 0:
+                continue
+            return RAM_BASE + off + 0x11BC
+        return None
 
     # -- party / battle --------------------------------------------------------------------------
     def parties(self) -> list[pkm.Party]:
@@ -244,12 +266,84 @@ class Game:
         return "couldn't reach the game (check look())"
 
     # -- navigation -----------------------------------------------------------------------------
+    def go_to(self, place: str, max_legs: int = 120, came_from: int | None = None) -> str:
+        """Walk to a town/route on the current overworld by name ("Cherrygrove", "Route 30"), using the
+        ROM's chunk -> map table to find where it starts. Stops for battles, trainers and events like walk_to."""
+        loc = self.location()
+        mi = MAPS.get(loc.map_id, {}).get("matrix")
+        cm = mapdata.chunk_maps(mi) if mi is not None else None
+        if not cm:  # inside: take a door that leads there, else one that leads outside
+            if max_legs <= 0:
+                return f"stuck going between buildings; now {loc}"
+            norm = lambda t: t.lower().replace("route ", "route")
+            def outdoors(mid):
+                m = MAPS.get(mid, {}).get("matrix")
+                return m is not None and bool(mapdata.chunk_maps(m))
+            doors = self.exits()
+            door = (next((d for d in doors if norm(place) in norm(d["to"])), None)
+                    or next((d for d in doors if outdoors(d["id"]) and d["id"] != came_from), None)
+                    or next((d for d in doors if outdoors(d["id"])), None))
+            if door is None:
+                return "not on an overworld map and no door out found (use exits())"
+            r = self.walk_to(door["x"], door["y"])
+            now = self.location()
+            if now.map_id == loc.map_id:
+                return f"couldn't leave through ({door['x']},{door['y']}): {r['note']}"
+            if norm(place) in norm(now.name):
+                return f"reached: {r['note']}; now {now}"
+            return self.go_to(place, max_legs - r["legs"] - 5, came_from=loc.map_id)
+        w, h, ids = cm
+        want = place.lower().replace("route ", "route")
+        def matches(mid):
+            m = MAPS.get(mid, {})
+            names = (m.get("name", ""), m.get("area", ""))
+            return any(want in n.lower().replace("route ", "route") for n in names)
+        chunks = [(i % w, i // w) for i, mid in enumerate(ids) if matches(mid)]
+        if not chunks:
+            return f"'{place}' isn't on this map"
+        if matches(loc.map_id):
+            return f"already in {loc.name}"
+        # candidate tiles: walkable tiles of the target chunks, nearest first (straight-line)
+        cands = []
+        warps = {(x, y) for m in MAPS.values() if m.get("matrix") == mi for x, y, _ in m.get("warps", [])}
+        for cx, cy in chunks:
+            for ty in range(cy * 32, cy * 32 + 32):
+                for tx in range(cx * 32, cx * 32 + 32):
+                    if (not mapdata.solid(mi, tx, ty) and (tx, ty) not in warps
+                            and mapdata.behavior(mi, tx, ty) not in mapdata.LEDGES):
+                        cands.append((abs(tx - loc.x) + abs(ty - loc.y), tx, ty))
+        cands.sort()
+        goal = None
+        for _, tx, ty in cands[:: max(1, len(cands) // 40)][:40]:  # spread-out sample of the nearest side
+            if _plan(loc.map_id, (loc.x, loc.y), (tx, ty), margin=60) is not None:
+                goal = (tx, ty)
+                break
+        if goal is None:
+            # gatehouse pattern: a building whose other door opens onto a different outdoor map
+            if max_legs > 0:
+                for d in sorted(self.exits(), key=lambda d: abs(d["dx"]) + abs(d["dy"])):
+                    inner = MAPS.get(d["id"], {})
+                    if inner.get("matrix") is not None and mapdata.chunk_maps(inner["matrix"]):
+                        continue  # leads outdoors directly
+                    if not any(dest != loc.map_id and MAPS.get(dest, {}).get("matrix") == mi
+                               for _, _, dest in inner.get("warps", [])):
+                        continue
+                    r = self.walk_to(d["x"], d["y"])
+                    if self.location().map_id == d["id"]:
+                        return self.go_to(place, max_legs - r["legs"] - 5, came_from=loc.map_id)
+            return f"no walkable way to {place} found from here (water/cut trees/ledges?)"
+        r = self.walk_to(*goal, max_moves=max_legs)
+        now = self.location()
+        reached = matches(now.map_id)
+        return (f"{'reached' if reached else 'stopped'}: {r['note']}; now {r['at']}"
+                + ("" if reached else f" (target tile {goal})"))
+
     def exits(self) -> list[dict]:
         """Doors/warps on the current map with where they lead (from the game's event data)."""
         loc = self.location()
         out = []
         for x, y, dest in MAPS.get(loc.map_id, {}).get("warps", []):
-            out.append({"x": x, "y": y, "to": MAPS.get(dest, {}).get("name", f"map {dest}"),
+            out.append({"x": x, "y": y, "id": dest, "to": MAPS.get(dest, {}).get("name", f"map {dest}"),
                         "dx": x - loc.x, "dy": y - loc.y})
         return out
 
@@ -261,7 +355,7 @@ class Game:
         # a person standing in the way, so it's only remembered for this walk.
         bumped = {}  # tile -> leg it was bumped at; expires (people move, timing glitches happen)
         npcs = {(x, y) for x, y, _ in MAPS.get(start.map_id, {}).get("npcs", [])}
-        note, legs = "", 0
+        note, legs, last_dir = "", 0, "down"
         world = MAPS.get(start.map_id, {}).get("matrix")
         while legs < max_moves:
             cur = self.location()
@@ -270,6 +364,21 @@ class Game:
                 break
             if (cur.x, cur.y) == (tx, ty):
                 note = "arrived"
+                warps = {(x, y) for x, y, _ in MAPS.get(cur.map_id, {}).get("warps", [])}
+                if (tx, ty) in warps and legs:  # exit mats/stairs/doors need one more push to warp
+                    mi_ = MAPS.get(cur.map_id, {}).get("matrix")
+                    # push only toward a wall or the map edge: that's what triggers the warp (an open
+                    # neighbour would just step us off the door)
+                    walls = [d for d, (ddx, ddy) in DIRS.items()
+                             if mi_ is None or mapdata.solid(mi_, tx + ddx, ty + ddy)]
+                    order = ([last_dir] if last_dir in walls else []) + walls
+                    for d in dict.fromkeys(order or [last_dir]):
+                        r = self.walk(d, 1)
+                        if "entered" in r["note"]:
+                            note = r["note"]
+                            break
+                        if self.location().map_id != cur.map_id or (self.location().x, self.location().y) != (tx, ty):
+                            break  # stepped off a mat that wasn't a warp after all
                 break
             blocked = {t for t, leg in bumped.items() if legs - leg < 4}
             path = _plan(cur.map_id, (cur.x, cur.y), (tx, ty), blocked, npcs - {(tx, ty)})
@@ -287,6 +396,7 @@ class Game:
             while run_len < len(path) and path[run_len] == d0:
                 run_len += 1
             r = self.walk(d0, run_len, run=run)
+            last_dir = d0
             legs += 1
             if any(k in r["note"] for k in ("message box", "battle", "screen changed")):
                 note = r["note"]  # interrupted: don't mistake it for a wall
@@ -297,6 +407,53 @@ class Game:
                 bumped[(after.x + ddx, after.y + ddy)] = legs
         end = self.location()
         return {"at": str(end), "note": note or "gave up", "legs": legs}
+
+    def npcs(self) -> list:
+        """People on the current map: spawn tile + sprite name from the event data (they may wander)."""
+        loc = self.location()
+        return [{"x": x, "y": y, "sprite": spr, "dx": x - loc.x, "dy": y - loc.y}
+                for x, y, spr in MAPS.get(loc.map_id, {}).get("npcs", [])]
+
+    def talk(self, who: str = "") -> str:
+        """Walk next to a person (sprite-name substring from npcs(); the nearest one if empty), face them and
+        press A. Tries each side of them, then across a counter. Follow with read_text()."""
+        loc = self.location()
+        people = [p for p in self.npcs() if who.lower() in p["sprite"]]
+        if not people:
+            names = ", ".join(sorted({p["sprite"] for p in self.npcs()})) or "nobody"
+            return f"no '{who}' on this map (here: {names})"
+        mi = MAPS.get(loc.map_id, {}).get("matrix")
+        others = {(p["x"], p["y"]) for p in self.npcs()}
+        for person in sorted(people, key=lambda p: abs(p["dx"]) + abs(p["dy"])):
+            x, y = person["x"], person["y"]
+            spots = []
+            for d, (dx, dy) in DIRS.items():  # stand on the side opposite d, facing d
+                for reach in (1, 2):  # 2 = across a counter (the tile between must be solid)
+                    sx, sy = x - dx * reach, y - dy * reach
+                    if mi is not None and mapdata.solid(mi, sx, sy):
+                        continue
+                    if reach == 2 and (mi is None or not mapdata.solid(mi, x - dx, y - dy)):
+                        continue
+                    here = (loc.x, loc.y) == (sx, sy)
+                    path = [] if here else _plan(loc.map_id, (loc.x, loc.y), (sx, sy), avoid=others)
+                    if path is not None:
+                        spots.append((len(path) + 10 * (reach - 1), (sx, sy), d))
+            for _, (sx, sy), d in sorted(spots)[:3]:
+                if (self.location().x, self.location().y) != (sx, sy):
+                    self.walk_to(sx, sy)
+                cur = self.location()
+                if (cur.x, cur.y) != (sx, sy):
+                    if screen.textbox_present(grab(self.emu)):
+                        return f"interrupted on the way at {cur}: a message is open (read_text)"
+                    continue
+                self.emu.press(d.capitalize(), 3, 8)  # a tap turns without stepping (they block the tile)
+                if (self.location().x, self.location().y) != (sx, sy):
+                    continue  # they had wandered off and we stepped: try again from here
+                self.emu.press("A", 3, 30)
+                if screen.textbox_present(grab(self.emu)) or not screen.field_menu(grab(self.emu)):
+                    return f"talking to {person['sprite']} (from {cur}, facing {d}); use read_text"
+            # nobody answered at this spot: they've probably wandered; try the next match
+        return f"couldn't reach or get a reply from '{who or 'anyone'}' (people wander: look() and walk next to them)"
 
     def heal(self) -> str:
         """In a Pokemon Center: talk to the nurse across the counter, answer Yes, wait for the heal."""
@@ -380,6 +537,26 @@ class Game:
         party = self.party_address()
         return struct.unpack("<I", self.emu.read(party + self.MONEY_FROM_PARTY, 4))[0] if party else None
 
+    # Bag pockets in the save block, as offsets from the party header (save offsets 0x644.. minus 0x90),
+    # with their slot counts. Each slot = u16 item id + u16 quantity.
+    BAG_POCKETS = [("Items", 0x5B4, 165), ("Key Items", 0x848, 50), ("TMs & HMs", 0x910, 101),
+                   ("Mail", 0xAA4, 12), ("Medicine", 0xAD4, 40), ("Berries", 0xB74, 64),
+                   ("Poke Balls", 0xC74, 24), ("Battle Items", 0xCD4, 30)]
+
+    def bag(self) -> dict[str, list[tuple[str, int]]]:
+        """Items per Bag pocket, read from the save block in RAM: {"Poke Balls": [("Poke Ball", 5)], ...}."""
+        party = self.party_address()
+        if not party:
+            return {}
+        out = {}
+        for name, off, n in self.BAG_POCKETS:
+            raw = self.emu.read(party + off, n * 4)
+            slots = [struct.unpack_from("<HH", raw, i * 4) for i in range(n)]
+            items = [(pkm.ITEMS.get(i, f"item {i}"), q) for i, q in slots if i and q and i < 600 and q < 1000]
+            if items:
+                out[name] = items
+        return out
+
     def shop_list(self) -> list[int] | None:
         """The open shop's items (Gen 4 item ids): the longest known Mart list present in RAM. Known lists
         come from pret's scrcmd_mart.c (badge-gated general stock + every specialty clerk)."""
@@ -413,7 +590,9 @@ class Game:
         px = img.load()
         best, best_n = None, 0
         for name, y in (("buy", 192 + 30), ("sell", 192 + 78), ("quit", 192 + 126)):
-            n = sum(1 for x in range(8, 248, 3) if px[x, y][0] > 200 and px[x, y][1] < 90 and px[x, y][2] < 90)
+            # the border's row shifts by a few pixels (menu slide-in): take the best row near y
+            n = max(sum(1 for x in range(8, 248, 3) if px[x, yy][0] > 200 and px[x, yy][1] < 90 and px[x, yy][2] < 90)
+                    for yy in range(y - 6, y + 7))
             if n > best_n:
                 best, best_n = name, n
         return best if best_n > 20 else None
@@ -546,6 +725,9 @@ class Game:
         lines = [f"at: {loc} | area: {loc.area}" + (f" | money P{money}" if money is not None else "")]
         party = self.party()
         lines.append("party: " + ("; ".join(m.line() for m in party) if party else "none"))
+        if party:
+            balls = self.bag().get("Poke Balls", [])
+            lines.append("balls: " + (", ".join(f"{n} x{q}" for n, q in balls) if balls else "none"))
         names = ["hp", "atk", "def", "spe", "spa", "spd", "acc", "eva"]
         for b in self.battlers():  # only while a battle is on screen (old opponents linger in RAM)
             m = b["mon"]

@@ -2,7 +2,7 @@
 
   python hgss_mcp/cli.py state | look [both|top|bottom|text] | press "Down*2 A" | text [max] | walk DIR [N] [run]
   python hgss_mcp/cli.py fight MOVE | auto MOVE | catch | run | buy ITEM [QTY] | heal | to X Y | go PLACE | exits | npcs | talk [WHO]
-  python hgss_mcp/cli.py bag | grass | scene | yes | no | menu ITEM | type TEXT | save
+  python hgss_mcp/cli.py speed [PCT] | swap A B | switch NAME | bag | grass | scene | yes | no | menu ITEM | type TEXT | save
   python hgss_mcp/cli.py journal | note TEXT | goal TEXT | enc SPECIES RESULT [NICK] | death NICK CAUSE | badge NAME
 Images are written to <work>/shots/look.png or text.png (read them with your image/file tool).
 """
@@ -48,6 +48,17 @@ def main(argv):
         print(mcp_server.walk_to(int(args[0]), int(args[1])))
     elif cmd == "exits":
         print(mcp_server.exits())
+    elif cmd == "speed":
+        print(mcp_server.speed(int(args[0]) if args else 100))
+    elif cmd == "switch":
+        r = g.switch_to(" ".join(args))
+        print(f"{len(r['messages'])} messages; {r['note']}")
+        if r["messages"]:
+            screen.montage(r["messages"]).save(SHOTS / "text.png")
+            print(SHOTS / "text.png")
+        print(g.summary())
+    elif cmd == "swap":
+        print(mcp_server.swap(args[0], args[1]))
     elif cmd == "bag":
         print(mcp_server.bag())
     elif cmd == "go":

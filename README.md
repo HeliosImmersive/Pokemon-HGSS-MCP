@@ -26,7 +26,7 @@ and the ROM's map data instead, and only sends images when the agent asks:
 
 | Tool | What it does |
 |---|---|
-| `state()` | Location (map name, area, x/y), money, party with HP/moves/PP, live battle HP and stat stages, whether this area's Nuzlocke encounter is free, message-box status |
+| `state()` | Location (map name, area, x/y), money, Poké Balls, party with HP/moves/PP, your battler's live HP and stat stages, the foe as the game shows it (name, level, gender, HP bar %, status, moves it has used; no types or hidden stats), foe flags (SHINY, dupe of an owned evolution line), whether this area's Nuzlocke encounter is free, message-box status |
 | `look(view)` | Native-resolution screenshot: `both`, `top`, `bottom`, `text` |
 | `press(keys)` | Buttons in order: `"Down*2 A"`, `"A+B"`, `"wait30"`, `"hold:Right:40"` |
 | `read_text()` | Press through dialogue until it closes or a real Yes/No choice appears. Handles phone calls too |
@@ -34,19 +34,23 @@ and the ROM's map data instead, and only sends images when the agent asks:
 | `answer(yes)` | Answer a Yes/No prompt by steering the highlight |
 | `walk(dir, n, run)` / `walk_to(x, y)` | Movement with position checks from RAM; stops for battles, trainers and events |
 | `exits()` | Doors/warps on the current map with coordinates and destinations |
-| `go_to(place)` | Walk to a town or route by name ("Cherrygrove", "Route 30"), leaving buildings and passing through gatehouses on the way |
+| `go_to(place)` | Walk to a town, route or building floor by name ("Cherrygrove", "Route 30", "Sprout Tower 3F"): through doors, gatehouses and multi-floor buildings |
 | `npcs()` / `talk(who)` | People on the map (sprite name + spawn tile) / walk up to someone, face them, press A and read the conversation |
 | `bag()` | Everything in the Bag by pocket, read from RAM (`state()` also shows the Poké Ball count) |
-| `seek_encounter()` | Walk to the nearest tall grass and pace until a wild battle starts |
+| `seek_encounter()` | Walk to the nearest tall grass (or pace on a cave/tower floor) until a wild battle starts |
 | `fight(move)` / `fight_until(move)` | Use a move by name or slot and follow the turn; repeat until the battle ends (hands back control at low HP) |
 | `catch(slot)` / `run_away()` | Throw a ball from the Poké Balls pocket / flee |
+| `switch_to(name)` | In battle: send in another party member (finds it on the battle's reordered party screen) |
+| `swap(a, b)` | Outside battle: swap two party members (e.g. put a Pokémon in the lead to train it) |
 | `heal()` | Inside a Pokémon Center: talk to the nurse and heal |
 | `buy(item, quantity)` | Inside a Poké Mart: talk to the clerk, buy by item name, confirm, leave; checks the money spent from RAM |
 | `open_menu(item)` / `save()` | Field menu entries; in-game save written to disk |
+| `speed(percent)` | Emulation speed (100 = normal; higher skips ahead between decisions) |
 | `type_text(text)` | Type on naming keyboards (player, nicknames, rival) |
 | `run_journal()`, `log_encounter()`, `log_death()`, `note()`, `set_goal()`, `add_badge()` | Optional Nuzlocke journal: the run's memory between sessions |
 
-There is deliberately no savestate or reload tool, so outcomes can't be undone.
+There is deliberately no savestate or reload tool, so outcomes can't be undone. The tools also never reveal
+more about an opponent than the screen does, and never make strategic calls: the agent plays from its own knowledge.
 
 ## Requirements
 
@@ -113,7 +117,7 @@ with play habits that keep token use low; drop it into your agent's skills folde
 - **Touch input doesn't work**: BizHawk's melonDS core ignores Lua touch coordinates. Everything goes
   through buttons, which covers HG/SS's menus, battles and the field menu.
 - Some bottom-screen-only messages aren't read by `read_text()`; use `look("bottom")` and `press()`.
-- Double battles, moves that need a target, reordering the party and the PC box don't have helpers yet. `buy()` handles the first
+- Double battles, moves that need a target, learning a fifth move, using items from the Bag and the PC box don't have helpers yet. `buy()` handles the first
   page of a shop (six items); paging through longer shop lists isn't scripted yet.
 - RAM offsets were verified on HeartGold (USA). SoulSilver and other regions likely work but are untested.
 - Windows pauses BizHawk while its window is being dragged.

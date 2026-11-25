@@ -12,12 +12,14 @@ from pathlib import Path
 from config import RUN_FILE as RUN  # noqa: E402
 
 RULES = [
-    "Only the first wild encounter in each area may be caught (areas = the game's location names).",
-    "Encounters before getting Poke Balls don't count; dupes clause: re-roll species already caught.",
-    "A Pokemon that faints is dead: box it for good, never use it again.",
+    "First wild encounter per area only (area = the game's location name); if it faints, flees or breaks out of the last ball, the area is spent.",
+    "Encounters before getting Poke Balls don't count.",
+    "Fainted = dead: box it for good, never use it again.",
     "Nickname every Pokemon.",
     "Battle style SET (no free switch after a knockout).",
-    "No savestates or reloads to undo outcomes (the bridge exposes none).",
+    "No savestates or reloads to undo outcomes; a white-out ends the run.",
+    "Dupes clause: a first encounter from an evolution line already owned doesn't count; the first non-dupe in the area is the encounter.",
+    "Shiny clause: shinies may always be caught and don't use up the area's encounter.",
 ]
 
 

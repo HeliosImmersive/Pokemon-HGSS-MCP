@@ -129,6 +129,21 @@ def buy(item: str, quantity: int = 1) -> str:
 
 
 @mcp.tool()
+def speed(percent: int = 100) -> str:
+    """Emulation speed in percent (100 = normal; up to ~800 to skip ahead to decisions, at more CPU)."""
+    pct = max(25, min(1600, int(percent)))
+    g().emu.speed(pct)
+    return f"speed {pct}%"
+
+
+@mcp.tool()
+def swap(a: str, b: str) -> str:
+    """Swap two party members outside battle (slot numbers 1-6 or nicknames), e.g. swap("TALUS", "1") to
+    put TALUS in the lead. Verified from RAM."""
+    return g().swap(a, b)
+
+
+@mcp.tool()
 def bag() -> str:
     """Everything in the Bag by pocket (read from RAM; no menus opened)."""
     b = g().bag()
@@ -227,6 +242,13 @@ def _battle_result(r) -> list:
         out.append(_png(screen.montage(r["messages"])))
     out.append(g().summary())
     return out
+
+
+@mcp.tool()
+def switch_to(who: str) -> list:
+    """In battle: switch to another party member by nickname (or party slot). Uses your turn; the foe
+    attacks the incoming Pokemon. Returns the turn's messages + live HP like fight()."""
+    return _battle_result(g().switch_to(who))
 
 
 @mcp.tool()

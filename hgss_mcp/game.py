@@ -17,6 +17,7 @@ RAM_BASE, RAM_SIZE = 0x02000000, 0x400000
 # of the game. Verified each read and re-found by scanning if it ever moves.
 LOC_GUESS = 0x0227D4F4  # new game, before the first Pokemon (no party to anchor on yet)
 PARTY_TO_LOC = 0x11A4    # save block: Location record sits this far after the player's Party
+PLAYTIME_FROM_PARTY = -0x0A  # u16 hours, u8 minutes, u8 seconds (save offset 0x86; party header at 0x90)
 DIRS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 STEP_FRAMES = 16  # walking speed: one tile per 16 frames
 
@@ -32,8 +33,10 @@ def _plan(map_id: int, start, goal, learned=frozenset(), avoid=frozenset(), marg
     warps = {(x, y) for x, y, _ in info.get("warps", [])}
 
     def open_(x, y):
-        if (x, y) == goal or (x, y) in warps:
+        if (x, y) == goal:
             return True
+        if (x, y) in warps:  # stepping on another door/stairs on the way would warp us off the path
+            return False
         if (x, y) in learned or (x, y) in avoid:
             return False
         return True if mi is None else not mapdata.solid(mi, x, y)
@@ -146,25 +149,47 @@ class Game:
         """The player's party: the Party struct whose save block has a valid Location record after it.
         (The save block moves between a new game and a loaded save, so this is found by scanning.)"""
         if self.party_addr:
-            p = pkm.read_party(self.emu.read(self.party_addr, 8 + 6 * pkm.PKM_SIZE), self.party_addr)
-            if p:
-                return self.party_addr
+            for _ in range(3):  # a member can be mid-update for a frame (healing, EXP, walking counters)
+                p = pkm.read_party(self.emu.read(self.party_addr, 8 + 6 * pkm.PKM_SIZE), self.party_addr)
+                if p:
+                    return self.party_addr
+                self.emu.wait(2)
         self.party_addr = None
-        for p in sorted(self.parties(), key=lambda p: p.addr):
-            m, w, x, y = struct.unpack("<4I", self.emu.read(p.addr + PARTY_TO_LOC, 16))
-            # warp = index of the door used to arrive (-1 if none). The live save block is the
-            # lower one; a stale copy (the save as read at the title screen) sits higher in RAM.
-            if self._plausible_loc(m, w, x, y) and m > 3 and x and y:
-                self.party_addr = p.addr
-                break
+        # Two copies of the save block can hold a party: the live one and the save as loaded at the title
+        # screen (stale). The live one's play-time counter keeps ticking, so the copy with the most play
+        # time wins (ties: lowest address). Scan twice: a copy can be unreadable for a frame mid-update.
+        cands = {}
+        ram = self.ram()
+        for hit in pkm._PARTY_HDR.finditer(ram):
+            off = hit.start()
+            if off % 4 or off + PARTY_TO_LOC + 16 > len(ram) or off < 0x10:
+                continue
+            m, w, x, y = struct.unpack_from("<4I", ram, off + PARTY_TO_LOC)
+            # warp = index of the door used to arrive (-1 if none)
+            if not (self._plausible_loc(m, w, x, y) and m > 3 and x and y):
+                continue
+            addr = RAM_BASE + off
+            # a member can be caught mid-update (checksum fails for a frame): re-read just this party
+            for _ in range(4):
+                if pkm.read_party(self.emu.read(addr, 8 + 6 * pkm.PKM_SIZE), addr):
+                    hrs, mins, secs = struct.unpack_from("<HBB", ram, off + PLAYTIME_FROM_PARTY)
+                    cands[addr] = hrs * 3600 + mins * 60 + secs
+                    break
+                self.emu.wait(2)
+        if cands:
+            self.party_addr = max(cands, key=lambda a: (cands[a], -a))
         return self.party_addr
 
     def party(self) -> list[pkm.Pokemon]:
         addr = self.party_address()
         if not addr:
             return []
-        p = pkm.read_party(self.emu.read(addr, 8 + 6 * pkm.PKM_SIZE), addr)
-        return p.members if p else []
+        for _ in range(3):
+            p = pkm.read_party(self.emu.read(addr, 8 + 6 * pkm.PKM_SIZE), addr)
+            if p:
+                return p.members
+            self.emu.wait(2)
+        return []
 
     def opponents(self) -> list[pkm.Pokemon]:
         """Pokemon in party structs that aren't the player's (a battle's opposing side)."""
@@ -266,6 +291,43 @@ class Game:
         return "couldn't reach the game (check look())"
 
     # -- navigation -----------------------------------------------------------------------------
+    def _warp_route(self, loc, goal, max_nodes: int = 300):
+        """Shortest walk through doors/stairs from where we stand to any map satisfying goal(map_id), over
+        indoor maps (towers and caves split floors into sections, so walkability between warp tiles is
+        checked with the planner). Returns the first warp tile to walk onto, or None. Arrival tiles are
+        approximated: the destination's warp back to where we came from, nearest the door we took."""
+        import heapq
+        def indoor(mid):
+            m = MAPS.get(mid, {}).get("matrix")
+            return not (m is not None and mapdata.chunk_maps(m))
+        start = (loc.map_id, loc.x, loc.y)
+        best, first, heap, n = {start: 0}, {start: None}, [(0, start)], 0
+        while heap and n < max_nodes:
+            cost, node = heapq.heappop(heap)
+            n += 1
+            m, x, y = node
+            if node != start and goal(m):
+                return first[node]
+            if node != start and not indoor(m):
+                continue  # don't wander the overworld here; go_to's outdoor branch does that
+            for wx, wy, dest in MAPS.get(m, {}).get("warps", []):
+                if dest not in MAPS or ((wx, wy) == (x, y) and node != start):
+                    continue
+                path = [] if (wx, wy) == (x, y) else _plan(m, (x, y), (wx, wy), margin=20)
+                if path is None:
+                    continue
+                back = [(ax, ay) for ax, ay, d2 in MAPS[dest].get("warps", []) if d2 == m]
+                if back:
+                    ax, ay = min(back, key=lambda t: abs(t[0] - wx) + abs(t[1] - wy))
+                else:
+                    ax, ay = wx, wy
+                nxt, c = (dest, ax, ay), cost + len(path) + 1
+                if c < best.get(nxt, 1 << 30):
+                    best[nxt] = c
+                    first[nxt] = first[node] or (wx, wy)
+                    heapq.heappush(heap, (c, nxt))
+        return None
+
     def go_to(self, place: str, max_legs: int = 120, came_from: int | None = None) -> str:
         """Walk to a town/route on the current overworld by name ("Cherrygrove", "Route 30"), using the
         ROM's chunk -> map table to find where it starts. Stops for battles, trainers and events like walk_to."""
@@ -280,9 +342,14 @@ class Game:
                 m = MAPS.get(mid, {}).get("matrix")
                 return m is not None and bool(mapdata.chunk_maps(m))
             doors = self.exits()
-            door = (next((d for d in doors if norm(place) in norm(d["to"])), None)
-                    or next((d for d in doors if outdoors(d["id"]) and d["id"] != came_from), None)
-                    or next((d for d in doors if outdoors(d["id"])), None))
+            named = lambda mid: norm(place) in norm(MAPS.get(mid, {}).get("name", ""))
+            # "violet" means the city, not "Violet Pokecenter B1f": only route to a building by name when
+            # no outdoor map answers to that name
+            outdoor_place = any(named(mid) and outdoors(mid) for mid in MAPS)
+            hop = ((None if outdoor_place else self._warp_route(loc, lambda mid: named(mid) and not outdoors(mid)))
+                   or self._warp_route(loc, lambda mid: outdoors(mid) and mid != came_from)
+                   or self._warp_route(loc, outdoors))
+            door = next((d for d in doors if hop and (d["x"], d["y"]) == hop), None)
             if door is None:
                 return "not on an overworld map and no door out found (use exits())"
             r = self.walk_to(door["x"], door["y"])
@@ -299,8 +366,17 @@ class Game:
             names = (m.get("name", ""), m.get("area", ""))
             return any(want in n.lower().replace("route ", "route") for n in names)
         chunks = [(i % w, i // w) for i, mid in enumerate(ids) if matches(mid)]
-        if not chunks:
-            return f"'{place}' isn't on this map"
+        if not chunks:  # maybe a building or a floor of one ("sprout tower 3f", "violet gym")
+            norm = lambda t: t.lower().replace("route ", "route")
+            hop = self._warp_route(loc, lambda mid: norm(place) in norm(MAPS.get(mid, {}).get("name", "")))
+            if hop is None:
+                return f"'{place}' isn't on this map or reachable through a door from here"
+            r = self.walk_to(*hop)
+            if self.location().map_id == loc.map_id:
+                return f"stopped on the way to the door at {hop}: {r['note']}; now {r['at']}"
+            if norm(place) in norm(self.location().name):
+                return f"reached: {r['note']}; now {self.location()}"
+            return self.go_to(place, max_legs - r["legs"] - 5, came_from=loc.map_id)
         if matches(loc.map_id):
             return f"already in {loc.name}"
         # candidate tiles: walkable tiles of the target chunks, nearest first (straight-line)
@@ -321,7 +397,9 @@ class Game:
         if goal is None:
             # gatehouse pattern: a building whose other door opens onto a different outdoor map
             if max_legs > 0:
-                for d in sorted(self.exits(), key=lambda d: abs(d["dx"]) + abs(d["dy"])):
+                def leads_there(d):  # a door out of that building opens onto the destination
+                    return any(matches(dest) for _, _, dest in MAPS.get(d["id"], {}).get("warps", []))
+                for d in sorted(self.exits(), key=lambda d: (not leads_there(d), abs(d["dx"]) + abs(d["dy"]))):
                     inner = MAPS.get(d["id"], {})
                     if inner.get("matrix") is not None and mapdata.chunk_maps(inner["matrix"]):
                         continue  # leads outdoors directly
@@ -331,6 +409,8 @@ class Game:
                     r = self.walk_to(d["x"], d["y"])
                     if self.location().map_id == d["id"]:
                         return self.go_to(place, max_legs - r["legs"] - 5, came_from=loc.map_id)
+                    if any(k in r["note"] for k in ("battle", "message box", "phone")):
+                        return f"stopped on the way to the {d['to']} door: {r['note']}; now {r['at']}"
             return f"no walkable way to {place} found from here (water/cut trees/ledges?)"
         r = self.walk_to(*goal, max_moves=max_legs)
         now = self.location()
@@ -346,6 +426,34 @@ class Game:
             out.append({"x": x, "y": y, "id": dest, "to": MAPS.get(dest, {}).get("name", f"map {dest}"),
                         "dx": x - loc.x, "dy": y - loc.y})
         return out
+
+    def _trigger_warp(self, map_id: int, tx: int, ty: int, last_dir: str) -> str | None:
+        """Standing on a warp tile that didn't fire. Doors and exit mats fire when you push into the wall
+        behind them; stairs fire only when stepped onto from their open side. Try pushing toward walls
+        first, then step off and back on from each side. Returns the "entered ..." note, or None."""
+        back = {"up": "down", "down": "up", "left": "right", "right": "left"}
+        mi = MAPS.get(map_id, {}).get("matrix")
+        walls = [d for d, (dx, dy) in DIRS.items() if mi is None or mapdata.solid(mi, tx + dx, ty + dy)]
+        for d in dict.fromkeys(([last_dir] if last_dir in walls else []) + walls):
+            r = self.walk(d, 1)
+            if "entered" in r["note"]:
+                return r["note"]
+            if (self.location().x, self.location().y) != (tx, ty):
+                break
+        for d in [d for d in DIRS if d not in walls]:
+            here = self.location()
+            if here.map_id != map_id:
+                return f"entered {here.name}"
+            if (here.x, here.y) == (tx, ty):
+                r = self.walk(d, 1)  # step off...
+                if "entered" in r["note"]:
+                    return r["note"]
+                if (self.location().x, self.location().y) == (tx, ty):
+                    continue
+            r = self.walk(back[d], 1)  # ...and back on, facing the other way
+            if "entered" in r["note"]:
+                return r["note"]
+        return None
 
     def walk_to(self, tx: int, ty: int, max_moves: int = 40, run: bool = True) -> dict:
         """Path to (tx, ty) with BFS over tiles, learning walls as it bumps into them.
@@ -366,19 +474,7 @@ class Game:
                 note = "arrived"
                 warps = {(x, y) for x, y, _ in MAPS.get(cur.map_id, {}).get("warps", [])}
                 if (tx, ty) in warps and legs:  # exit mats/stairs/doors need one more push to warp
-                    mi_ = MAPS.get(cur.map_id, {}).get("matrix")
-                    # push only toward a wall or the map edge: that's what triggers the warp (an open
-                    # neighbour would just step us off the door)
-                    walls = [d for d, (ddx, ddy) in DIRS.items()
-                             if mi_ is None or mapdata.solid(mi_, tx + ddx, ty + ddy)]
-                    order = ([last_dir] if last_dir in walls else []) + walls
-                    for d in dict.fromkeys(order or [last_dir]):
-                        r = self.walk(d, 1)
-                        if "entered" in r["note"]:
-                            note = r["note"]
-                            break
-                        if self.location().map_id != cur.map_id or (self.location().x, self.location().y) != (tx, ty):
-                            break  # stepped off a mat that wasn't a warp after all
+                    note = self._trigger_warp(cur.map_id, tx, ty, last_dir) or note
                 break
             blocked = {t for t, leg in bumped.items() if legs - leg < 4}
             path = _plan(cur.map_id, (cur.x, cur.y), (tx, ty), blocked, npcs - {(tx, ty)})
@@ -455,6 +551,76 @@ class Game:
             # nobody answered at this spot: they've probably wandered; try the next match
         return f"couldn't reach or get a reply from '{who or 'anyone'}' (people wander: look() and walk next to them)"
 
+    def _party_slot(self, who) -> int | None:
+        party = self.party()
+        if isinstance(who, int) or str(who).isdigit():
+            n = int(who)
+            return n if 1 <= n <= len(party) else None
+        names = [(m.nickname or m.name).lower() for m in party]
+        return names.index(str(who).lower()) + 1 if str(who).lower() in names else None
+
+    def _grid_move(self, frm: int, to: int) -> None:
+        """Party screen: 2 columns x 3 rows, slot 1 top-left, 2 top-right, 3 below 1..."""
+        (r0, c0), (r1, c1) = divmod(frm - 1, 2), divmod(to - 1, 2)
+        for _ in range(abs(r1 - r0)):
+            self.emu.press("Down" if r1 > r0 else "Up", 3, 10)
+        for _ in range(abs(c1 - c0)):
+            self.emu.press("Right" if c1 > c0 else "Left", 3, 10)
+
+    @staticmethod
+    def _submenu_buttons(img) -> int:
+        """Orange/yellow option buttons stacked in the party submenu's right column (SUMMARY, SWITCH, ITEM,
+        plus field moves); QUIT sits apart in the corner."""
+        px = img.load()
+        runs, run = 0, 0
+        for y in range(192 + 10, 192 + 150):
+            r, g, b = px[190, y]
+            if r > 200 and g > 100 and b < 170:
+                run += 1
+            else:
+                if run >= 10:
+                    runs += 1
+                run = 0
+        return runs + (1 if run >= 10 else 0)
+
+    def swap(self, a, b) -> str:
+        """Swap two party members (slot number 1-6 or nickname) from the field: X -> POKEMON -> pick ->
+        SWITCH -> pick the other. Checked against the party order in RAM."""
+        import actions
+        sa, sb = self._party_slot(a), self._party_slot(b)
+        party = self.party()
+        if not sa or not sb or sa == sb:
+            names = ", ".join(f"{i + 1} {m.nickname or m.name}" for i, m in enumerate(party))
+            return f"pick two different party members (slots or nicknames): {names}"
+        before = [m.pid for m in party]
+        r = actions.open_menu(self.emu, "pokemon")
+        if not r.startswith("opened"):
+            return r
+        self.emu.wait(40)
+        self._grid_move(1, sa)
+        self.emu.press("A", 3, 30)
+        n = self._submenu_buttons(grab(self.emu))
+        if n < 3:
+            self.emu.press("B", 3, 20)
+        else:
+            for _ in range(n - 2):  # SWITCH is the second-to-last button (just above ITEM)
+                self.emu.press("Down", 3, 10)
+            self.emu.press("A", 3, 30)
+            self._grid_move(sa, sb)
+            self.emu.press("A", 3, 60)
+        for _ in range(4):  # back out to the field
+            if screen.field_menu(grab(self.emu)) and actions._menu_cursor(grab(self.emu)) is not None:
+                break
+            self.emu.press("B", 3, 30)
+        self.emu.press("B", 3, 10)  # close the field menu's button mode
+        after = [m.pid for m in self.party()]
+        want = before[:]
+        want[sa - 1], want[sb - 1] = want[sb - 1], want[sa - 1]
+        order = ", ".join(f"{i + 1} {m.nickname or m.name}" for i, m in enumerate(self.party()))
+        if after == want:
+            return f"swapped; party: {order}"
+        return f"swap didn't take (submenu had {n} buttons); party: {order} (look('bottom'))"
+
     def heal(self) -> str:
         """In a Pokemon Center: talk to the nurse across the counter, answer Yes, wait for the heal."""
         import actions
@@ -501,10 +667,31 @@ class Game:
         return None
 
     def seek_encounter(self, max_steps: int = 80) -> str:
-        """Walk to the nearest tall grass and pace inside it until a wild battle starts."""
+        """Walk to the nearest tall grass and pace inside it until a wild battle starts. Without grass
+        (caves, towers: encounters on the floor itself), pace back and forth on open floor."""
         g = self.nearest_grass()
         if g is None:
-            return "no tall grass nearby"
+            loc = self.location()
+            mi = MAPS.get(loc.map_id, {}).get("matrix")
+            warps = {(x, y) for x, y, _ in MAPS.get(loc.map_id, {}).get("warps", [])}
+            npcs = {(x, y) for x, y, _ in MAPS.get(loc.map_id, {}).get("npcs", [])}
+            free = lambda x, y: (mi is None or not mapdata.solid(mi, x, y)) and (x, y) not in warps | npcs
+            pair = next(((d, back) for d, back in (("left", "right"), ("up", "down"))
+                         if free(loc.x + DIRS[d][0], loc.y + DIRS[d][1])), None)
+            if pair is None:
+                return "no tall grass nearby and no open floor to pace on"
+            steps = 0
+            while steps < max_steps:
+                for step_dir in pair:
+                    w = self.walk(step_dir, 1)
+                    steps += 1
+                    if "battle" in w["note"] or "screen changed" in w["note"]:
+                        return f"battle started after {steps} steps on the floor (no grass here)"
+                    if "message box" in w["note"]:
+                        return f"a message opened after {steps} steps (trainer or event)"
+                    if "entered" in w["note"]:
+                        return f"walked through a warp while pacing: {w['note']}"
+            return f"no encounter in {steps} steps on the floor: this map may have no wild Pokemon"
         r = self.walk_to(*g, run=False)
         if "battle" in r["note"]:
             return f"battle started on the way ({self.location()})"
@@ -685,11 +872,21 @@ class Game:
                 break
         before = start_money
         self.emu.press("B", 3, 40)  # leave the item grid -> "Anything else?" BUY/SELL/SEE YA menu
-        for _ in range(4):  # B on that menu is SEE YA!; stop once the overworld menu is back
-            if screen.field_menu(grab(self.emu)):
+        for _ in range(8):  # steer to SEE YA! and confirm; stop once the overworld menu is back
+            img = grab(self.emu)
+            if screen.field_menu(img):
                 break
-            self.emu.press("B", 3, 30)
-            actions.advance_text(self.emu, max_messages=3)
+            cur = self._mart_menu_cursor(img)
+            if cur == "quit":
+                self.emu.press("A", 3, 30)
+            elif cur is not None:
+                self.emu.press("Down", 3, 10)
+                continue
+            elif self._shop_cursor(img) is not None:
+                self.emu.press("B", 3, 30)  # still in the item grid
+            else:
+                self.emu.press("A", 3, 20)  # "Please come again!"
+            self.emu.wait(20)
         after = self.money()
         spent = (before - after) if before is not None and after is not None else None
         got = spent // price if spent is not None and price else None
@@ -719,6 +916,42 @@ class Game:
         return {"messages": msgs, "note": note}
 
     # -- summary --------------------------------------------------------------------------------
+    TID_FROM_PARTY = -0x1C  # u16 trainer ID, then u16 secret ID (save offsets 0x74/0x76)
+
+    def is_shiny(self, mon) -> bool:
+        """Gen 4: shiny when TID ^ SID ^ PID-high ^ PID-low < 8."""
+        party = self.party_address()
+        if not party:
+            return False
+        tid, sid = struct.unpack("<HH", self.emu.read(party + self.TID_FROM_PARTY, 4))
+        return (tid ^ sid ^ (mon.pid >> 16) ^ (mon.pid & 0xFFFF)) < 8
+
+    @staticmethod
+    def family(species: int) -> int:
+        """Root of the evolution line (Pidgeotto -> Pidgey)."""
+        seen = set()
+        while species not in seen:
+            seen.add(species)
+            prev = pkm.SPECIES.get(species, {}).get("evolves_from") or 0
+            if not prev:
+                break
+            species = prev
+        return species
+
+    def dupe_of(self, species: int) -> str | None:
+        """Dupes clause: name of an owned Pokemon (party or caught in the journal) in the same line."""
+        import journal
+        fam = self.family(species)
+        for m in self.party():
+            if self.family(m.species) == fam:
+                return m.nickname or m.name
+        by_name = {v.get("name", "").lower(): int(k) for k, v in pkm.DATA.get("species", {}).items()}
+        for e in journal.load().get("encounters", {}).values():
+            sp = by_name.get(str(e.get("species", "")).lower())
+            if e.get("result") == "caught" and sp and self.family(sp) == fam:
+                return e.get("nickname") or e.get("species")
+        return None
+
     def summary(self) -> str:
         loc = self.location()
         money = self.money()
@@ -731,13 +964,31 @@ class Game:
         names = ["hp", "atk", "def", "spe", "spa", "spd", "acc", "eva"]
         for b in self.battlers():  # only while a battle is on screen (old opponents linger in RAM)
             m = b["mon"]
-            st = " ".join(f"{n}{v:+d}" for n, v in zip(names, b["stages"]) if v)
-            line = (f"battle {'YOU' if b['side'] == 'you' else 'FOE'}: {m.nickname or m.name} ({m.name}) "
-                    f"L{m.level} HP {b['hp']}/{b['max']} {'/'.join(m.types())}")
-            if st:
-                line += f" stages {st}"
-            if b["side"] == "foe":
-                line += " moves " + ", ".join(pkm.MOVES.get(mv, {}).get("name", str(mv)) for mv, _ in m.moves)
+            st = " ".join(f"{n}{v:+d}" for n, v in zip(names, b["stages"]) if v)  # announced in battle
+            if b["side"] == "you":
+                line = (f"battle YOU: {m.nickname or m.name} ({m.name}) L{m.level} HP {b['hp']}/{b['max']} "
+                        f"{'/'.join(m.types())}")
+                if st:
+                    line += f" stages {st}"
+            else:
+                # Only what the game shows the player: name, level, gender, HP bar, status icon, announced
+                # stat changes and the moves it has used. No types, exact HP or unseen moves.
+                pct = b["hp"] * 100 // b["max"] if b["max"] else 0
+                bar = "green" if pct > 50 else "yellow" if pct > 20 else "red"
+                shown = 0 if b["hp"] == 0 else max(5, int(round(pct / 5.0)) * 5)
+                sex = {0: " ♂", 1: " ♀"}.get(b.get("gender"), "")
+                status = self.status_text(b.get("status", 0))
+                line = (f"battle FOE: {m.nickname or m.name} L{b['level']}{sex} HP bar ~{shown}% ({bar})"
+                        + (f" {status}" if status else ""))
+                if st:
+                    line += f" stages {st}"
+                seen = self.seen_moves(b)
+                line += " | moves seen: " + (", ".join(seen) if seen else "none yet")
+                if self.is_shiny(m):
+                    line += " | SHINY (shiny clause: may be caught, doesn't use the area's encounter)"
+                dupe = self.dupe_of(m.species)
+                if dupe:
+                    line += f" | if wild: DUPE of {dupe}'s line (dupes clause: doesn't count, keep looking)"
             lines.append(line)
         return "\n".join(lines)
 
@@ -812,6 +1063,37 @@ class Game:
             else:
                 self.emu.wait(10)
         return False
+
+    def switch_to(self, who) -> dict:
+        """In battle: send in another party member (nickname, or slot in the party order). The battle's
+        party screen puts the active Pokemon first and swaps on every switch; that order is read from the
+        battle's own copy of the party (the copy of my team whose first member is the active battler)."""
+        active = next((b["mon"] for b in self.battlers() if b["side"] == "you"), None)
+        if active is None:
+            return {"note": "not in a battle", "messages": []}
+        party = self.party()
+        slot = self._party_slot(who)
+        if not slot:
+            return {"note": f"no party member '{who}'", "messages": []}
+        target = party[slot - 1].pid
+        if target == active.pid:
+            return {"note": f"{who} is already in battle", "messages": []}
+        mine = {m.pid for m in party}
+        if not self._wait_battle_menu() or not self.battle_select("pokemon"):
+            return {"note": "couldn't open the POKEMON menu", "messages": []}
+        self.emu.wait(40)
+        # the screen's order lives in a party copy that exists only while this screen is open
+        copies = [q for q in self.parties() if {m.pid for m in q.members} == mine and q.members[0].pid == active.pid]
+        order = max(copies, key=lambda q: q.addr).members if copies else party
+        pos = next((i + 1 for i, m in enumerate(order) if m.pid == target), None)
+        if pos is None or pos == 1 or order[pos - 1].hp <= 0:
+            self.emu.press("B", 3, 30)
+            why = "has fainted" if pos and order[pos - 1].hp <= 0 else "couldn't be found on the screen"
+            return {"note": f"{who} {why}", "messages": []}
+        self._grid_move(1, pos)
+        self.emu.press("A", 3, 30)   # -> big SHIFT button (highlighted)
+        self.emu.press("A", 3, 20)   # SHIFT
+        return self.watch_turn()
 
     def run_away(self) -> dict:
         """Choose RUN in a wild battle and follow the result (escapes can fail)."""
@@ -992,7 +1274,33 @@ class Game:
             mx, = struct.unpack_from("<H", block, o + 0x50)
             if not 0 < mx < 1000 or hp > mx:
                 continue
-            m = mons[sp]
-            out.append({"mon": m, "side": "you" if k % 2 == 0 else "foe", "hp": hp, "max": mx,
-                        "level": block[o + 0x34], "stages": [v - 6 for v in block[o + 0x18:o + 0x20]]})
+            side = "you" if k % 2 == 0 else "foe"
+            own = {x.species: x for x in (party if side == "you" else opp)}
+            m = own.get(sp, mons[sp])  # the foe's Rattata isn't my NIBBLES just because it's a Rattata
+            # BattleMon (pret include/battle/battle.h): moves +0x0C (4 x u16), current PP +0x2C, PP Ups +0x30,
+            # status +0x6C, gender +0x7E (low 4 bits)
+            moves = struct.unpack_from("<4H", block, o + 0x0C)
+            out.append({"mon": m, "side": side, "hp": hp, "max": mx,
+                        "level": block[o + 0x34], "stages": [v - 6 for v in block[o + 0x18:o + 0x20]],
+                        "moves": [(mv, block[o + 0x2C + i], block[o + 0x30 + i]) for i, mv in enumerate(moves)],
+                        "status": struct.unpack_from("<I", block, o + 0x6C)[0],
+                        "gender": block[o + 0x7E] & 0x0F})
         return out
+
+    @staticmethod
+    def seen_moves(b: dict) -> list[str]:
+        """A foe's moves the game has shown: any move with PP spent (using a move costs PP even when it
+        misses or fails; Spite's message names the move too)."""
+        out = []
+        for mv, pp, ups in b.get("moves", []):
+            base = pkm.MOVES.get(mv, {}).get("pp")
+            if mv and base and pp < base * (5 + ups) // 5:
+                out.append(pkm.MOVES[mv]["name"])
+        return out
+
+    @staticmethod
+    def status_text(st: int) -> str:
+        if st & 0x7:
+            return "SLP"
+        return next((name for bit, name in ((0x8, "PSN"), (0x80, "PSN"), (0x10, "BRN"), (0x20, "FRZ"), (0x40, "PAR"))
+                     if st & bit), "")

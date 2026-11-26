@@ -88,7 +88,9 @@ class Pokemon:
 
     def line(self) -> str:
         """One-line summary for prompts (~25 tokens)."""
-        nick = f"{self.nickname} ({self.name})" if self.nickname and self.nickname.lower() != self.name.lower() else self.name
+        if self.is_egg:
+            return "Egg (hatches as you walk with it in the party)"  # the game doesn't reveal the species
+        nick =f"{self.nickname} ({self.name})" if self.nickname and self.nickname.lower() != self.name.lower() else self.name
         mv = ", ".join(f"{MOVES.get(m, {}).get('name', m)} {pp}" for m, pp in self.moves if m)
         st = f" {self.status}" if self.status else ""
         it = f" @{ITEMS.get(self.item, self.item)}" if self.item else ""

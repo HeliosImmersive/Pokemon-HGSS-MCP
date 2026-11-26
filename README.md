@@ -35,7 +35,7 @@ and the ROM's map data instead, and only sends images when the agent asks:
 | `walk(dir, n, run)` / `walk_to(x, y)` | Movement with position checks from RAM; stops for battles, trainers and events |
 | `exits()` | Doors/warps on the current map with coordinates and destinations |
 | `go_to(place)` | Walk to a town, route or building floor by name ("Cherrygrove", "Route 30", "Sprout Tower 3F"): through doors, gatehouses and multi-floor buildings |
-| `npcs()` / `talk(who)` | People on the map (sprite name + spawn tile) / walk up to someone, face them, press A and read the conversation |
+| `npcs()` / `talk(who)` | People on the map where they stand right now (read live from RAM, including ones placed by story events) / walk up to someone, face them, press A and read the conversation |
 | `bag()` | Everything in the Bag by pocket, read from RAM (`state()` also shows the Poké Ball count) |
 | `seek_encounter()` | Walk to the nearest tall grass (or pace on a cave/tower floor) until a wild battle starts |
 | `fight(move)` / `fight_until(move)` | Use a move by name or slot and follow the turn; repeat until the battle ends (hands back control at low HP) |
@@ -117,7 +117,7 @@ with play habits that keep token use low; drop it into your agent's skills folde
 - **Touch input doesn't work**: BizHawk's melonDS core ignores Lua touch coordinates. Everything goes
   through buttons, which covers HG/SS's menus, battles and the field menu.
 - Some bottom-screen-only messages aren't read by `read_text()`; use `look("bottom")` and `press()`.
-- Double battles, moves that need a target, learning a fifth move, using items from the Bag and the PC box don't have helpers yet. `buy()` handles the first
+- Double battles, moves that need a target, learning a fifth move, using items from the Bag, the PC box and Pokégear calls don't have helpers yet. `buy()` handles the first
   page of a shop (six items); paging through longer shop lists isn't scripted yet.
 - RAM offsets were verified on HeartGold (USA). SoulSilver and other regions likely work but are untested.
 - Windows pauses BizHawk while its window is being dragged.

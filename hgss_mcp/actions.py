@@ -211,8 +211,10 @@ def type_text(emu: Emu, text: str, confirm: bool = True) -> str:
 
 
 # -- field menu (bottom screen; X switches it to button control) ----------------------------
-MENU_SLOTS = {"pokegear": (44, 226), "trainer": (124, 226), "pokemon": (44, 266), "save": (124, 266),
-              "bag": (44, 306), "options": (124, 306)}
+# Field menu tiles (button mode), centres in the full 256x384 image. Before the Pokedex the top-left
+# tile is empty; POKEGEAR is always bottom-left.
+MENU_SLOTS = {"pokedex": (44, 226), "trainer": (124, 226), "pokemon": (44, 266), "save": (124, 266),
+              "bag": (44, 306), "options": (124, 306), "pokegear": (44, 346)}
 HILITE_RGB = (243, 24, 24)
 
 
@@ -227,7 +229,7 @@ def _menu_cursor(img: Image.Image):
 
 
 def open_menu(emu: Emu, item: str) -> str:
-    """Open a field-menu entry (pokegear, trainer, pokemon, save, bag, options) by steering the highlight."""
+    """Open a field-menu entry (pokedex, trainer, pokemon, save, bag, options, pokegear) by steering the highlight."""
     item = item.lower().replace("é", "e")
     if item not in MENU_SLOTS:
         return f"unknown menu item {item}; options: {', '.join(MENU_SLOTS)}"

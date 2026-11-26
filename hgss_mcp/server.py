@@ -159,8 +159,10 @@ def go_to(place: str) -> str:
 
 @mcp.tool()
 def npcs() -> str:
-    """People on this map: sprite name and spawn tile (dx/dy from you). They may have wandered."""
+    """People on this map where they stand right now (read live from RAM, including people placed by
+    story events), nearest first: sprite name, tile, dx/dy from you."""
     return "\n".join(f"{p['sprite']} ({p['x']},{p['y']}) [dx {p['dx']:+d}, dy {p['dy']:+d}]"
+                     + (" (placed by an event)" if p.get("scripted") else "")
                      for p in g().npcs()) or "nobody on this map"
 
 

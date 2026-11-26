@@ -10,6 +10,7 @@ import mapdata
 import screen
 from actions import grab
 from emu import Emu
+from config import IPC
 
 MAPS = {int(k): v for k, v in pkm.DATA.get("maps", {}).items()}
 RAM_BASE, RAM_SIZE = 0x02000000, 0x400000
@@ -17,6 +18,7 @@ RAM_BASE, RAM_SIZE = 0x02000000, 0x400000
 # of the game. Verified each read and re-found by scanning if it ever moves.
 LOC_GUESS = 0x0227D4F4  # new game, before the first Pokemon (no party to anchor on yet)
 PARTY_TO_LOC = 0x11A4    # save block: Location record sits this far after the player's Party
+SEEN_FILE = IPC / "battle_seen.json"  # foe moves seen this battle (cleared when it ends)
 PLAYTIME_FROM_PARTY = -0x0A  # u16 hours, u8 minutes, u8 seconds (save offset 0x86; party header at 0x90)
 DIRS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 STEP_FRAMES = 16  # walking speed: one tile per 16 frames
@@ -504,9 +506,43 @@ class Game:
         end = self.location()
         return {"at": str(end), "note": note or "gave up", "legs": legs}
 
-    def npcs(self) -> list:
-        """People on the current map: spawn tile + sprite name from the event data (they may wander)."""
+    MAPOBJ_SIZE = 0x12C  # LocalMapObject (pret include/map_object.h)
+
+    def live_objects(self) -> list[dict]:
+        """People and objects on the map right now, from the game's LocalMapObject array: flags +0x00
+        (bit 0 active), id +0x08, mapId +0x0C, spriteId +0x10, currentX +0x64, currentZ +0x6C (the map's
+        y; +0x68 is height). Includes ones spawned by scripts, which the event data doesn't list."""
         loc = self.location()
+        ram = self.ram()
+        sprites = pkm.DATA.get("sprites", {})
+        key = struct.pack("<I", loc.map_id)
+        out, seen = [], set()
+        i = ram.find(key, 0x100000)
+        while i != -1:
+            off = i - 0x0C
+            if off % 4 == 0 and off > 0 and off + self.MAPOBJ_SIZE <= len(ram):
+                flags, _, oid, mid, spr = struct.unpack_from("<5I", ram, off)
+                x, _, z = struct.unpack_from("<IiI", ram, off + 0x64)
+                ix, _, iz = struct.unpack_from("<3I", ram, off + 0x4C)
+                if (flags & 1 and spr < 2000 and str(spr) in sprites and x < 4096 and z < 4096
+                        and abs(int(x) - int(ix)) < 64 and abs(int(z) - int(iz)) < 64 and oid < 256
+                        and (x, z) != (loc.x, loc.y) and (oid, x, z) not in seen):
+                    seen.add((oid, x, z))
+                    out.append({"x": x, "y": z, "sprite": sprites[str(spr)], "id": oid,
+                                "dx": x - loc.x, "dy": z - loc.y})
+            i = ram.find(key, i + 4)
+        return out
+
+    def npcs(self) -> list:
+        """People on the current map where they stand now (live from RAM; scripted ones included). Falls
+        back to the event data's spawn tiles if the live list can't be read."""
+        loc = self.location()
+        live = self.live_objects()
+        if live:
+            static = {spr for _, _, spr in MAPS.get(loc.map_id, {}).get("npcs", [])}
+            for o in live:
+                o["scripted"] = o["sprite"] not in static
+            return sorted(live, key=lambda o: abs(o["dx"]) + abs(o["dy"]))
         return [{"x": x, "y": y, "sprite": spr, "dx": x - loc.x, "dy": y - loc.y}
                 for x, y, spr in MAPS.get(loc.map_id, {}).get("npcs", [])]
 
@@ -1244,6 +1280,7 @@ class Game:
         the party data) and then read by address, so level-ups mid-battle don't lose it."""
         if screen.field_menu(grab(self.emu)):
             self.battle_base = None
+            SEEN_FILE.unlink(missing_ok=True)  # battle over: start fresh next time
             return []
         party, opp = self.party(), self.opponents()
         mons = {m.species: m for m in opp}
@@ -1285,18 +1322,40 @@ class Game:
                         "moves": [(mv, block[o + 0x2C + i], block[o + 0x30 + i]) for i, mv in enumerate(moves)],
                         "status": struct.unpack_from("<I", block, o + 0x6C)[0],
                         "gender": block[o + 0x7E] & 0x0F})
+        self._track_seen([b for b in out if b["side"] == "foe"])
         return out
+
+    def _track_seen(self, foes: list) -> None:
+        """Remember each foe's PP from the first time it's on screen; a move counts as seen once its PP
+        drops below that (using a move costs PP even when it misses or fails). Kept in a small file so it
+        survives between CLI calls; cleared when the battle ends."""
+        import json
+        try:
+            seen = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            seen = {}
+        changed = False
+        for b in foes:
+            key = f"{b['mon'].pid:08x}"
+            pps = [pp for _, pp, _ in b["moves"]]
+            if key not in seen:
+                seen[key] = {"pp": pps, "seen": []}
+                changed = True
+            rec = seen[key]
+            for (mv, pp, _), first in zip(b["moves"], rec["pp"]):
+                name = pkm.MOVES.get(mv, {}).get("name")
+                if mv and name and pp < first and name not in rec["seen"]:
+                    rec["seen"].append(name)
+                    changed = True
+            b["seen"] = list(rec["seen"])
+        if changed:
+            SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SEEN_FILE.write_text(json.dumps(seen), encoding="utf-8")
 
     @staticmethod
     def seen_moves(b: dict) -> list[str]:
-        """A foe's moves the game has shown: any move with PP spent (using a move costs PP even when it
-        misses or fails; Spite's message names the move too)."""
-        out = []
-        for mv, pp, ups in b.get("moves", []):
-            base = pkm.MOVES.get(mv, {}).get("pp")
-            if mv and base and pp < base * (5 + ups) // 5:
-                out.append(pkm.MOVES[mv]["name"])
-        return out
+        """A foe's moves the game has shown (tracked from PP spent since it came out; see _track_seen)."""
+        return b.get("seen", [])
 
     @staticmethod
     def status_text(st: int) -> str:

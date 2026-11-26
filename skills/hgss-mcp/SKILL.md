@@ -29,8 +29,8 @@ Every image stays in the conversation and is re-read on each turn, so prefer tex
   `walk_to(x, y)`: both use the ROM's collision map, jump ledges, avoid tall grass, and walking onto a door
   goes through it. `exits()` lists doors/warps with coordinates. Walking stops on battles, trainers and
   events: then use `read_text()` / `follow_scene()` or the battle tools, and call `go_to` again.
-- People: `talk("mama")` walks up to someone (sprite name from `npcs()`, nearest person if empty), faces
-  them and reads the conversation. `bag()` lists items; `state()` shows the Poké Ball count.
+- People: `npcs()` lists who is on the map right now (live from RAM, story-placed people included);
+  `talk("mama")` walks up to someone (sprite name, nearest person if empty), faces them and reads the conversation. `bag()` lists items; `state()` shows the Poké Ball count.
 - Think briefly on routine steps; save careful thinking for battles, catches and team decisions.
 
 ## Battles: use the battle tools, not raw presses
@@ -62,7 +62,9 @@ Raw `press("A")` in battle is how runs get ruined: A on the battle menu picks FI
 - Touch input doesn't work; buttons cover menus and battles (X toggles the field menu into button mode).
 - Bottom-screen-only messages (some prompts) aren't read by `read_text()`: `look("bottom")` + `press()`.
 - No helpers yet for double battles, targeting, learning a fifth move ("Forget a move!" -> pick -> FORGET),
-  using Bag items or the PC box; `buy()` only covers a shop's first page.
+  using Bag items, the PC box (PC = the counter tile with behaviour 0x83; DEPOSIT, mind RELEASE) or Pokégear
+  calls; `buy()` only covers a shop's first page. Story calls can ring between your commands: if the user
+  mentions one, call the person back from the Pokégear phone tab.
 - The tools never judge matchups for you (by design): reading type danger, deciding when to switch, run
   or heal, and catch odds are your calls. `fight_until` only hands back at low HP.
 - `catch()` reports "timeout" on a species' first catch: that's the Pokédex page; press A, then the

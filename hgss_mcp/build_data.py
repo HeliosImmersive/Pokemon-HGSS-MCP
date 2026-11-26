@@ -227,3 +227,10 @@ out["marts"] = {"badge": badge_items, "lists": lists}
 out["prices"] = prices
 (DATA / "gen4.json").write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
 print(f"marts: {len(badge_items)} badge items, {len(lists)} lists; Poke Ball costs {prices.get(4)}")
+
+# Overworld sprite ids -> names (pret include/constants/sprites.h), for live people on the map (npcs()).
+_download(PRET_RAW + "include/constants/sprites.h", PRET / "sprites.h")
+out["sprites"] = {int(n): name.lower() for name, n in
+                  re.findall(r"#define SPRITE_(\w+)\s+(\d+)", (PRET / "sprites.h").read_text())}
+(DATA / "gen4.json").write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
+print("sprites:", len(out["sprites"]))
